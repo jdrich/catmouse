@@ -3,7 +3,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readdir, readFile } from 'node:fs/promises';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adapters, type AdapterId } from '../adapters/index.ts';
@@ -14,6 +14,7 @@ import { canResume, driveRun, LEVELS, loadRun, publicRun, type RunEvent, type Ru
 
 const uiRoot = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(uiRoot, '..');
+const pidPath = join(repoRoot, '.serve.pid');
 const port = Number(process.env.PORT || 5173);
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -368,6 +369,41 @@ const server = createServer((req, res) => {
       if (!res.headersSent) json(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
 });
+
+function pidAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function claimPid() {
+  if (existsSync(pidPath)) {
+    const prev = Number(readFileSync(pidPath, 'utf8').trim());
+    if (Number.isFinite(prev) && prev !== process.pid && pidAlive(prev)) {
+      throw new Error(`already running as pid ${prev} (${pidPath})`);
+    }
+  }
+  writeFileSync(pidPath, String(process.pid));
+}
+
+function dropPid() {
+  try {
+    const cur = Number(readFileSync(pidPath, 'utf8').trim());
+    if (cur === process.pid) unlinkSync(pidPath);
+  } catch {}
+}
+
+claimPid();
+process.on('exit', dropPid);
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    dropPid();
+    process.exit(0);
+  });
+}
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`catmouse ui http://127.0.0.1:${port}/`);

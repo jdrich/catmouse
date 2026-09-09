@@ -5,6 +5,7 @@ node_modules
 .grok-login.log
 .models-cache.json
 runs/
+.serve.pid
 ui/serve.log
 ui/serve.err
 ui/serve.pid
