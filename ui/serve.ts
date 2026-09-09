@@ -97,7 +97,7 @@ function defaults() {
   };
 }
 
-async function fetchModels(): Promise<ModelCache & { defaults: ReturnType<typeof defaults> }> {
+async function fetchModels(): Promise<ModelCache> {
   const cache: ModelCache = { fetchedAt: new Date().toISOString(), providers: {} };
   await Promise.all(
     readyIds().map(async (id) => {
@@ -116,7 +116,7 @@ async function fetchModels(): Promise<ModelCache & { defaults: ReturnType<typeof
     }),
   );
   writeModelCache(cache);
-  return { ...cache, defaults: defaults(), turnLimit: turnLimit() };
+  return cache;
 }
 
 function modelsPayload(cache: ModelCache | null) {
@@ -210,7 +210,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (req.method === 'GET' && pathname === '/api/models') {
     const refresh = url.searchParams.get('refresh') === '1';
     if (refresh || !readModelCache()) {
-      json(res, 200, await fetchModels());
+      json(res, 200, modelsPayload(await fetchModels()));
       return true;
     }
     json(res, 200, modelsPayload(readModelCache()));

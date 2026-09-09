@@ -19,7 +19,6 @@ export type Goal = {
 export type TurnRecord = ChatResponse & {
   attacker?: string;
   payload?: string;
-  reset?: boolean;
   probe?: boolean;
   remaining?: number;
 };
@@ -53,6 +52,22 @@ function describeForAttacker(def: ChatResponse): string {
   return bits.join('\n\n') || '(empty defender reply)';
 }
 
+async function chatAs(
+  role: 'attacker' | 'defender',
+  client: GenericClient,
+  messages: ChatMessage[],
+  tools: any[] | undefined,
+  signal?: AbortSignal,
+): Promise<ChatResponse> {
+  try {
+    return await client.chat(messages, tools, signal);
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (e.message === 'run aborted') throw e;
+    throw new Error(`${role} ${e.message}`);
+  }
+}
+
 /** Harness wrapper. Defender reply is raw; budget is injected here, never spoken by the defender. */
 function envelopeForAttacker(def: ChatResponse | null, remaining: number, limit: number): string {
   const parts: string[] = [];
@@ -67,7 +82,7 @@ export async function runAttack(opts: {
   goal: Goal;
   defenderSystem?: string;
   signal?: AbortSignal;
-  onTurn?: (turn: TurnRecord, turnsUsed: number, success: boolean) => void;
+  onTurn?: (turn: TurnRecord, turnsUsed: number, success: boolean) => void | Promise<void>;
 }): Promise<RunResult> {
   const turns: TurnRecord[] = [];
   const attackerMsgs: ChatMessage[] = [];
@@ -88,13 +103,13 @@ export async function runAttack(opts: {
     const prev = turns[turns.length - 1] ?? null;
     attackerMsgs.push({ role: 'user', content: envelopeForAttacker(prev, remaining, limit) });
 
-    const attack = await opts.attacker.chat(attackerMsgs, undefined, opts.signal);
+    const attack = await chatAs('attacker', opts.attacker, attackerMsgs, undefined, opts.signal);
     attackerMsgs.push({ role: 'assistant', content: attack.content ?? '' });
 
     const payload = extractPayload(attack.content ?? '');
     defenderMsgs.push({ role: 'user', content: payload });
 
-    const defense = await opts.defender.chat(defenderMsgs, STUB_TOOLS, opts.signal);
+    const defense = await chatAs('defender', opts.defender, defenderMsgs, STUB_TOOLS, opts.signal);
     defenderMsgs.push({
       role: 'assistant',
       content: defense.content ?? '',
@@ -112,12 +127,12 @@ export async function runAttack(opts: {
       content: defense.content,
       toolCalls: defense.toolCalls,
     });
-    opts.onTurn?.(record, i + 1, hit);
+    await opts.onTurn?.(record, i + 1, hit);
     if (hit) return { success: true, turnsUsed: i + 1, turns };
 
     if (opts.goal.probe) {
       defenderMsgs.push({ role: 'user', content: opts.goal.probe });
-      const probed = await opts.defender.chat(defenderMsgs, STUB_TOOLS, opts.signal);
+      const probed = await chatAs('defender', opts.defender, defenderMsgs, STUB_TOOLS, opts.signal);
       defenderMsgs.push({ role: 'assistant', content: probed.content ?? '' });
       const probeRecord: TurnRecord = {
         ...probed,
@@ -132,7 +147,7 @@ export async function runAttack(opts: {
         content: probed.content,
         toolCalls: probed.toolCalls,
       });
-      opts.onTurn?.(probeRecord, i + 1, hit);
+      await opts.onTurn?.(probeRecord, i + 1, hit);
       if (hit) return { success: true, turnsUsed: i + 1, turns };
     }
   }

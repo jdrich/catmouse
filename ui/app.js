@@ -1,13 +1,4 @@
-const LEVELS = window.CATMOUSE_DUMMY?.levels ?? [
-  { id: 1, name: 'canary' },
-  { id: 2, name: 'disclosure' },
-  { id: 3, name: 'fs-write' },
-  { id: 4, name: 'tool-call' },
-  { id: 5, name: 'exfil' },
-  { id: 6, name: 'persist' },
-  { id: 7, name: 'priv-esc' },
-  { id: 8, name: 'takeover' },
-];
+let LEVELS = (window.CATMOUSE_DUMMY?.levels || []).map((L) => ({ ...L }));
 
 let RUNS = [];
 let catalog = { providers: {}, defaults: {} };
@@ -305,8 +296,8 @@ function renderTurns() {
         ${tools ? `<pre class="tools">${escapeHtml(tools)}</pre>` : ''}
       </div>`;
       }
-      return `<div class="turn${t.reset ? ' reset' : ''}">
-        <div class="who">turn ${i + 1}${t.reset ? ' · reset' : ''}</div>
+      return `<div class="turn">
+        <div class="who">turn ${i + 1}</div>
         ${rem != null ? `<div class="who harness">harness → attacker</div><pre class="bubble harness">Turns remaining: ${rem} of ${TURN_LIMIT}.</pre>` : ''}
         <div class="who cat">attacker</div>
         <pre class="bubble">${escapeHtml(attackText || payload)}</pre>
@@ -477,11 +468,8 @@ async function loadCatalog() {
   if (!res.ok) throw new Error(`models ${res.status}`);
   catalog = await res.json();
   if (catalog.turnLimit) TURN_LIMIT = catalog.turnLimit;
-  if (Array.isArray(catalog.levels)) {
-    for (const row of catalog.levels) {
-      const L = LEVELS.find((x) => x.id === row.id);
-      if (L) Object.assign(L, row);
-    }
+  if (Array.isArray(catalog.levels) && catalog.levels.length) {
+    LEVELS = catalog.levels;
   }
   fillRole(atkProvider, atkModel, 'attacker');
   fillRole(defProvider, defModel, 'defender');

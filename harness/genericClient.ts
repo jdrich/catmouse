@@ -118,13 +118,15 @@ function requestSignal(user?: AbortSignal): { signal: AbortSignal; timeoutMs: nu
   };
 }
 
-function throwFetch(err: unknown, signal: AbortSignal, timeoutMs: number): never {
+function throwFetch(err: unknown, signal: AbortSignal, timeoutMs: number, model?: string): never {
   const reason = signal.reason as { name?: string } | undefined;
+  const tag = model ? `${model}: ` : '';
   if (reason?.name === 'TimeoutError' || (err instanceof DOMException && err.name === 'TimeoutError')) {
-    throw new Error(`model timed out after ${timeoutMs}ms`);
+    throw new Error(`${tag}model timed out after ${timeoutMs}ms`);
   }
   if (signal.aborted) throw new Error('run aborted');
-  throw err instanceof Error ? err : new Error(String(err));
+  const msg = err instanceof Error ? err.message : String(err);
+  throw new Error(msg.startsWith(tag) || !model ? msg : `${tag}${msg}`);
 }
 
 export class GenericClient {
@@ -204,7 +206,7 @@ export class GenericClient {
         raw: data,
       };
     } catch (err) {
-      throwFetch(err, req.signal, req.timeoutMs);
+      throwFetch(err, req.signal, req.timeoutMs, this.cfg.model);
     }
   }
 }
@@ -233,10 +235,4 @@ export async function listModels(
   return rows.map((m: any) => String(m.id ?? m.name ?? '')).filter(Boolean).sort();
 }
 
-export function createAttackerClient(cfg: ClientConfig) {
-  return new GenericClient(cfg);
-}
 
-export function createDefenderClient(cfg: ClientConfig) {
-  return new GenericClient(cfg);
-}

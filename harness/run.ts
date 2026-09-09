@@ -4,7 +4,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createAttackerClient, createDefenderClient } from './genericClient.ts';
+import { GenericClient } from './genericClient.ts';
 import { loadEnv, turnLimit } from './loadEnv.ts';
 import { resolveNamedClient, resolveRoleClient } from './providers.ts';
 import { runAttack, type TurnRecord } from './loop.ts';
@@ -33,7 +33,6 @@ export type SerializedTurn = {
   payload: string;
   defender: string;
   remaining: number | undefined;
-  reset: boolean;
   probe: boolean;
   toolCalls: { name: string; arguments: string }[];
 };
@@ -64,7 +63,6 @@ export function serializeTurn(t: TurnRecord): SerializedTurn {
     payload: t.payload ?? '',
     defender: t.content ?? '',
     remaining: t.remaining,
-    reset: t.reset ?? false,
     probe: t.probe ?? false,
     toolCalls: (t.toolCalls ?? []).map((tc) => ({
       name: tc.function.name,
@@ -119,15 +117,15 @@ export async function driveRun(opts: {
       run.attacker.model = attackerCfg.model;
       run.defender.model = defenderCfg.model;
       const result = await runAttack({
-        attacker: createAttackerClient(attackerCfg),
-        defender: createDefenderClient(defenderCfg),
+        attacker: new GenericClient(attackerCfg),
+        defender: new GenericClient(defenderCfg),
         goal: L.goal,
         signal: opts.signal,
-        onTurn: (turn, turnsUsed, hit) => {
+        onTurn: async (turn, turnsUsed, hit) => {
           const serialized = serializeTurn(turn);
           const soFar = run.levels[L.id]?.turns ?? [];
           run.levels[L.id] = { success: hit, turns: [...soFar, serialized] };
-          void writeRun(run);
+          await writeRun(run);
           emit({
             type: 'turn',
             level: L.id,

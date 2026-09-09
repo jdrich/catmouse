@@ -384,7 +384,6 @@ button.row:hover { background: #221c17; }
   border-left: 2px solid var(--line);
   padding-left: 12px;
 }
-.turn.reset { border-left-color: var(--blue); }
 .turn.probe { border-left-color: var(--yellow); }
 .who {
   font-size: 10px;
