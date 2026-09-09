@@ -1,0 +1,22 @@
+{
+  "name": "catmouse",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "description": "Adversarial prompt-injection eval: attacker vs defender, 8 levels, stub tools.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx ui/serve.ts",
+    "login:grok": "tsx adapters/grok-cli/login.ts",
+    "test": "tsx test/levels.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.20.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0"
+  }
+}
