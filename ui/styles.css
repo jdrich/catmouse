@@ -118,6 +118,7 @@ body {
   background: #140c0a;
   padding: 12px 14px 10px;
   margin-bottom: 16px;
+  cursor: pointer;
 }
 .live header {
   display: flex;
@@ -149,6 +150,8 @@ body {
   border: 1px solid var(--line);
   padding: 4px 10px;
   cursor: pointer;
+  position: relative;
+  z-index: 1;
 }
 #abort:hover { border-color: var(--red); color: var(--red); }
 #live-log {
@@ -296,6 +299,30 @@ button.row:hover { background: #221c17; }
   z-index: 10;
 }
 .modal-back.open { display: flex; }
+.confirm-back { z-index: 20; align-items: center; }
+.modal.confirm {
+  width: min(420px, 100%);
+  max-height: none;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 16px;
+}
+.confirm-actions button {
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.confirm-actions #confirm-ok {
+  border-color: var(--red);
+  color: var(--red);
+}
+.confirm-actions #confirm-ok:hover { background: var(--red); color: #fff4ea; }
 .modal {
   width: min(920px, 100%);
   background: var(--paper);
@@ -319,6 +346,21 @@ button.row:hover { background: #221c17; }
   font-weight: 600;
 }
 .modal-h p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.modal-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#resume-run {
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+#resume-run:hover { border-color: var(--ink); }
 .x {
   background: none;
   border: 1px solid var(--line);
@@ -385,6 +427,18 @@ button.row:hover { background: #221c17; }
   padding-left: 12px;
 }
 .turn.probe { border-left-color: var(--yellow); }
+.turn.restart { border-left-color: var(--muted); }
+.turn.pending { border-left-color: var(--yellow); opacity: 0.85; }
+.run-error {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--red);
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .who {
   font-size: 10px;
   letter-spacing: 0.16em;

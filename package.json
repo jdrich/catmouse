@@ -11,7 +11,7 @@
   "scripts": {
     "start": "tsx ui/serve.ts",
     "login:grok": "tsx adapters/grok-cli/login.ts",
-    "test": "tsx test/levels.ts"
+    "test": "tsx test/levels.ts && tsx test/restart.ts && tsx test/resume.ts"
   },
   "dependencies": {
     "tsx": "^4.20.5"

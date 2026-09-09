@@ -1,13 +1,13 @@
 // Drive L1–L8. Each level gets `turnLimit` attacker turns. Writes JSON to runs/.
 // Env: see .env.example (ATTACKER_PROVIDER/MODEL, DEFENDER_PROVIDER/MODEL).
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { GenericClient } from './genericClient.ts';
+import { GenericClient, type ReasoningEffort } from './genericClient.ts';
 import { loadEnv, turnLimit } from './loadEnv.ts';
-import { resolveNamedClient, resolveRoleClient } from './providers.ts';
-import { runAttack, type TurnRecord } from './loop.ts';
+import { resolveNamedClient } from './providers.ts';
+import { runAttack, type LevelCursor, type TurnRecord } from './loop.ts';
 import * as level1 from '../goals/level1.ts';
 import * as level2 from '../goals/level2.ts';
 import * as level3 from '../goals/level3.ts';
@@ -34,20 +34,31 @@ export type SerializedTurn = {
   defender: string;
   remaining: number | undefined;
   probe: boolean;
+  restart: boolean;
+  pending: boolean;
   toolCalls: { name: string; arguments: string }[];
 };
+
+export type RolePick = {
+  provider: string;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+};
+
+export type RunCursor = LevelCursor & { level: number };
 
 export type RunRecord = {
   id: string;
   at: string;
   kind: 'attack';
   status: 'running' | 'done' | 'aborted' | 'error';
-  attacker: { provider: string; model: string };
-  defender: { provider: string; model: string };
+  attacker: RolePick;
+  defender: RolePick;
   successes: number;
   note: string;
   error?: string;
   levels: Record<number, { success: boolean; turns: SerializedTurn[] }>;
+  cursor?: RunCursor;
 };
 
 export type RunEvent =
@@ -64,11 +75,64 @@ export function serializeTurn(t: TurnRecord): SerializedTurn {
     defender: t.content ?? '',
     remaining: t.remaining,
     probe: t.probe ?? false,
+    restart: t.restart ?? false,
+    pending: t.pending ?? false,
     toolCalls: (t.toolCalls ?? []).map((tc) => ({
       name: tc.function.name,
       arguments: tc.function.arguments,
     })),
   };
+}
+
+export function deserializeTurn(t: SerializedTurn): TurnRecord {
+  return {
+    content: t.defender,
+    toolCalls: (t.toolCalls ?? []).map((tc, i) => ({
+      id: `call_${i}`,
+      type: 'function',
+      function: { name: tc.name, arguments: tc.arguments },
+    })),
+    raw: {},
+    attacker: t.attacker,
+    payload: t.payload,
+    remaining: t.remaining,
+    probe: t.probe,
+    restart: t.restart,
+    pending: t.pending,
+  };
+}
+
+function attackerTurnsUsed(turns: SerializedTurn[] | undefined) {
+  return (turns ?? []).filter((t) => !t.probe && !t.restart && !t.pending).length;
+}
+
+function levelFinalized(run: RunRecord, id: number) {
+  if (run.cursor?.level === id) return false;
+  const rec = run.levels[id];
+  if (!rec) return false;
+  if (rec.success) return true;
+  if (rec.turns?.at(-1)?.pending) return false;
+  return attackerTurnsUsed(rec.turns) >= turnLimit();
+}
+
+export function canResume(run: RunRecord) {
+  if (run.status === 'done') return false;
+  if (run.cursor) return true;
+  return LEVELS.some((L) => !run.levels[L.id]);
+}
+
+export function publicRun(run: RunRecord): RunRecord {
+  if (!run.cursor) return run;
+  const { attackerMsgs, defenderMsgs, ...cursor } = run.cursor;
+  return { ...run, cursor: cursor as RunCursor };
+}
+
+export async function loadRun(id: string): Promise<RunRecord | null> {
+  try {
+    return JSON.parse(await readFile(runPath(id), 'utf8')) as RunRecord;
+  } catch {
+    return null;
+  }
 }
 
 function repoRoot() {
@@ -82,28 +146,59 @@ export function runPath(id: string) {
 async function writeRun(run: RunRecord) {
   const dir = join(repoRoot(), 'runs');
   await mkdir(dir, { recursive: true });
-  await writeFile(runPath(run.id), JSON.stringify(run, null, 2), 'utf8');
+  const dest = runPath(run.id);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(run, null, 2), 'utf8');
+  try {
+    await copyFile(tmp, dest);
+  } finally {
+    await unlink(tmp).catch(() => {});
+  }
 }
 
 export async function driveRun(opts: {
-  attacker: { provider: string; model: string };
-  defender: { provider: string; model: string };
+  attacker?: RolePick;
+  defender?: RolePick;
+  resume?: RunRecord;
   id?: string;
   signal?: AbortSignal;
   onEvent?: (event: RunEvent) => void;
 }): Promise<RunRecord> {
   const at = new Date().toISOString();
-  const run: RunRecord = {
-    id: opts.id || `run-${at.replace(/[:.]/g, '').slice(0, 15)}`,
-    at,
-    kind: 'attack',
-    status: 'running',
-    attacker: { provider: opts.attacker.provider, model: opts.attacker.model },
-    defender: { provider: opts.defender.provider, model: opts.defender.model },
-    successes: 0,
-    note: `running  ·  ${turnLimit()} turns / level`,
-    levels: {},
-  };
+  const prior = opts.resume;
+  if (prior && !canResume(prior)) throw new Error('this run cannot be resumed');
+  const attacker = prior?.attacker ?? opts.attacker;
+  const defender = prior?.defender ?? opts.defender;
+  if (!attacker?.provider || !attacker.model || !defender?.provider || !defender.model) {
+    throw new Error('attacker and defender models are required');
+  }
+  const run: RunRecord = prior
+    ? {
+        ...prior,
+        status: 'running',
+        error: undefined,
+        note: `resuming  ·  ${turnLimit()} turns / level`,
+        levels: { ...prior.levels },
+      }
+    : {
+        id: opts.id || `run-${at.replace(/[:.]/g, '').slice(0, 15)}`,
+        at,
+        kind: 'attack',
+        status: 'running',
+        attacker: {
+          provider: attacker.provider,
+          model: attacker.model,
+          reasoningEffort: attacker.reasoningEffort,
+        },
+        defender: {
+          provider: defender.provider,
+          model: defender.model,
+          reasoningEffort: defender.reasoningEffort,
+        },
+        successes: 0,
+        note: `running  ·  ${turnLimit()} turns / level`,
+        levels: {},
+      };
 
   const emit = (event: RunEvent) => opts.onEvent?.(event);
   emit({ type: 'start', run });
@@ -112,8 +207,13 @@ export async function driveRun(opts: {
   try {
     for (const L of LEVELS) {
       if (opts.signal?.aborted) throw new Error('run aborted');
-      const attackerCfg = await resolveNamedClient(opts.attacker.provider, opts.attacker.model);
-      const defenderCfg = await resolveNamedClient(opts.defender.provider, opts.defender.model);
+      if (levelFinalized(run, L.id)) continue;
+      const live = run.cursor?.level === L.id ? run.cursor : undefined;
+      if (!live && run.levels[L.id]) delete run.levels[L.id];
+      const attackerCfg = await resolveNamedClient(attacker.provider, attacker.model);
+      const defenderCfg = await resolveNamedClient(defender.provider, defender.model);
+      if (attacker.reasoningEffort) attackerCfg.reasoningEffort = attacker.reasoningEffort;
+      if (defender.reasoningEffort) defenderCfg.reasoningEffort = defender.reasoningEffort;
       run.attacker.model = attackerCfg.model;
       run.defender.model = defenderCfg.model;
       const result = await runAttack({
@@ -121,10 +221,20 @@ export async function driveRun(opts: {
         defender: new GenericClient(defenderCfg),
         goal: L.goal,
         signal: opts.signal,
-        onTurn: async (turn, turnsUsed, hit) => {
+        resume: live
+          ? {
+              ...live,
+              turns: (run.levels[L.id]?.turns ?? []).map(deserializeTurn),
+            }
+          : undefined,
+        onTurn: async (turn, turnsUsed, hit, cursor) => {
           const serialized = serializeTurn(turn);
           const soFar = run.levels[L.id]?.turns ?? [];
-          run.levels[L.id] = { success: hit, turns: [...soFar, serialized] };
+          const turns = soFar.at(-1)?.pending
+            ? [...soFar.slice(0, -1), serialized]
+            : [...soFar, serialized];
+          run.cursor = { level: L.id, ...cursor };
+          run.levels[L.id] = { success: hit, turns };
           await writeRun(run);
           emit({
             type: 'turn',
@@ -136,11 +246,12 @@ export async function driveRun(opts: {
           });
         },
       });
+      delete run.cursor;
       run.levels[L.id] = {
         success: result.success,
         turns: result.turns.map(serializeTurn),
       };
-      if (result.success) run.successes++;
+      run.successes = LEVELS.filter((row) => run.levels[row.id]?.success).length;
       emit({
         type: 'level',
         level: L.id,

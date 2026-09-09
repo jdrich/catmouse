@@ -9,7 +9,10 @@ export function completionsAdapter(
   id: string,
   init: {
     baseURL: string;
-    keyEnv: string;
+    /** If set, the provider is shown only when this env var is non-empty. */
+    keyEnv?: string;
+    /** If set (and keyEnv is omitted), shown only when this env var is non-empty. */
+    presentEnv?: string;
     api?: ClientApi;
     apiForModel?: (model: string) => ClientApi;
     headers?: () => Record<string, string>;
@@ -22,17 +25,21 @@ export function completionsAdapter(
   };
 
   const baseURL = () => process.env[`${envPrefix(id)}_BASE_URL`] || spec.baseURL;
-  const apiKey = () => process.env[spec.keyEnv!] || '';
+  const apiKey = () => (spec.keyEnv ? process.env[spec.keyEnv] || '' : '');
 
   return {
     id,
     spec,
-    hasCredentials: () => Boolean(apiKey()),
+    hasCredentials: () => {
+      if (spec.keyEnv) return Boolean(apiKey());
+      if (init.presentEnv) return Boolean(process.env[init.presentEnv]);
+      return true;
+    },
     async resolveClient(model: string): Promise<ClientConfig> {
       const key = apiKey();
-      if (!key) throw new Error(`missing env ${spec.keyEnv}`);
+      if (spec.keyEnv && !key) throw new Error(`missing env ${spec.keyEnv}`);
       return {
-        apiKey: key,
+        apiKey: key || 'local',
         baseURL: baseURL(),
         model,
         api: init.apiForModel?.(model) ?? spec.api,

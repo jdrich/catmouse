@@ -6,6 +6,8 @@ import { contextLimitTokens, modelTimeoutMs } from './loadEnv.ts';
 
 export type ClientApi = 'chat' | 'responses';
 
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface ClientConfig {
   apiKey: string;
   baseURL: string;        // e.g. https://api.openai.com/v1 or https://api.x.ai/v1
@@ -13,6 +15,8 @@ export interface ClientConfig {
   /** chat/completions (default) or OpenAI-style /responses (Grok CLI proxy). */
   api?: ClientApi;
   headers?: Record<string, string>;
+  /** Optional reasoning effort for models that support it (o1/o3, DeepSeek-R1, etc.). */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface ChatMessage {
@@ -62,6 +66,8 @@ function responsesTools(tools: any[]): any[] {
   });
 }
 
+export type OnDelta = (partial: ChatResponse) => void | Promise<void>;
+
 function parseResponses(data: any): ChatResponse {
   const toolCalls: ToolCall[] = [];
   let content = typeof data?.output_text === 'string' ? data.output_text : '';
@@ -83,6 +89,156 @@ function parseResponses(data: any): ChatResponse {
     if (chunk) content = content ? `${content}\n${chunk}` : chunk;
   }
   return { content: content || null, toolCalls, raw: data };
+}
+
+function parseChatJson(data: any): ChatResponse {
+  const choice = data?.choices?.[0]?.message;
+  const toolCalls: ToolCall[] = (choice?.tool_calls ?? []).map((tc: any) => ({
+    id: tc.id,
+    type: 'function' as const,
+    function: { name: tc.function.name, arguments: tc.function.arguments },
+  }));
+  return { content: choice?.content ?? null, toolCalls, raw: data };
+}
+
+function isSse(res: Response): boolean {
+  const ct = res.headers.get('content-type') || '';
+  return ct.includes('event-stream');
+}
+
+async function readSse(
+  res: Response,
+  handle: (data: any, event: string) => void | Promise<void>,
+  bump?: () => void,
+): Promise<void> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('empty stream');
+  const dec = new TextDecoder();
+  let buf = '';
+  let event = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value?.byteLength) bump?.();
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split(/\r?\n/);
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line) {
+        event = '';
+        continue;
+      }
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim();
+        continue;
+      }
+      if (!line.startsWith('data:')) continue;
+      const raw = line.slice(5).trim();
+      if (!raw || raw === '[DONE]') {
+        if (raw === '[DONE]') return;
+        continue;
+      }
+      let data: any;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (data?.error) {
+        const msg = typeof data.error === 'string' ? data.error : data.error.message || JSON.stringify(data.error);
+        throw new Error(String(msg));
+      }
+      await handle(data, event);
+    }
+  }
+}
+
+type Acc = { content: string; tools: Map<string | number, ToolCall>; raw: any };
+
+function snapshot(acc: Acc): ChatResponse {
+  return {
+    content: acc.content || null,
+    toolCalls: [...acc.tools.values()],
+    raw: acc.raw,
+  };
+}
+
+function applyChatDelta(acc: Acc, data: any): void {
+  acc.raw = data;
+  const delta = data?.choices?.[0]?.delta;
+  if (!delta) return;
+  if (typeof delta.content === 'string') acc.content += delta.content;
+  for (const tc of delta.tool_calls ?? []) {
+    const i = typeof tc.index === 'number' ? tc.index : acc.tools.size;
+    let cur = acc.tools.get(i);
+    if (!cur) {
+      cur = {
+        id: String(tc.id || `call_${i}`),
+        type: 'function',
+        function: { name: '', arguments: '' },
+      };
+      acc.tools.set(i, cur);
+    }
+    if (tc.id) cur.id = String(tc.id);
+    if (tc.function?.name) cur.function.name += tc.function.name;
+    if (typeof tc.function?.arguments === 'string') cur.function.arguments += tc.function.arguments;
+  }
+}
+
+function applyResponsesEvent(acc: Acc, data: any, event: string): void {
+  acc.raw = data;
+  const type = String(data?.type || event || '');
+  if (type === 'response.completed' || type === 'response.done') {
+    const parsed = parseResponses(data.response ?? data);
+    if (parsed.content) acc.content = parsed.content;
+    if (parsed.toolCalls.length) {
+      acc.tools = new Map(parsed.toolCalls.map((tc, i) => [tc.id || i, tc]));
+    }
+    return;
+  }
+  const delta = data?.delta ?? data?.text;
+  if (
+    (type.includes('output_text') || type.includes('text.delta') || type === 'response.output_text.delta') &&
+    typeof delta === 'string'
+  ) {
+    acc.content += delta;
+  }
+  const item = data?.item;
+  if (item && (item.type === 'function_call' || item.type === 'tool_call')) {
+    const id = String(item.call_id || item.id || `call_${acc.tools.size}`);
+    const args = item.arguments;
+    acc.tools.set(id, {
+      id,
+      type: 'function',
+      function: {
+        name: String(item.name || ''),
+        arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
+      },
+    });
+  }
+  if (type.includes('function_call_arguments') && typeof delta === 'string') {
+    const id = data.item_id ?? data.output_index ?? [...acc.tools.keys()].at(-1);
+    const cur = id != null ? acc.tools.get(id) : undefined;
+    if (cur) cur.function.arguments += delta;
+  }
+}
+
+async function finishChatStream(res: Response, onDelta?: OnDelta, bump?: () => void): Promise<ChatResponse> {
+  const acc: Acc = { content: '', tools: new Map(), raw: null };
+  await readSse(res, async (data) => {
+    applyChatDelta(acc, data);
+    await onDelta?.(snapshot(acc));
+  }, bump);
+  return snapshot(acc);
+}
+
+async function finishResponsesStream(res: Response, onDelta?: OnDelta, bump?: () => void): Promise<ChatResponse> {
+  const acc: Acc = { content: '', tools: new Map(), raw: null };
+  await readSse(res, async (data, event) => {
+    applyResponsesEvent(acc, data, event);
+    await onDelta?.(snapshot(acc));
+  }, bump);
+  return snapshot(acc);
 }
 
 function estimateTokens(text: string): number {
@@ -109,12 +265,24 @@ function clipToContextLimit<T extends { content?: string | null }>(
   return [head, ...revived];
 }
 
-function requestSignal(user?: AbortSignal): { signal: AbortSignal; timeoutMs: number } {
+function requestSignal(user?: AbortSignal): { signal: AbortSignal; timeoutMs: number; bump: () => void; clear: () => void } {
   const timeoutMs = modelTimeoutMs();
-  const timeout = AbortSignal.timeout(timeoutMs);
+  const ctrl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      ctrl.abort(new DOMException(`model timed out after ${timeoutMs}ms`, 'TimeoutError'));
+    }, timeoutMs);
+  };
+  arm();
+  const clear = () => clearTimeout(timer);
+  user?.addEventListener('abort', clear, { once: true });
   return {
     timeoutMs,
-    signal: user ? AbortSignal.any([user, timeout]) : timeout,
+    bump: arm,
+    clear,
+    signal: user ? AbortSignal.any([user, ctrl.signal]) : ctrl.signal,
   };
 }
 
@@ -132,7 +300,12 @@ function throwFetch(err: unknown, signal: AbortSignal, timeoutMs: number, model?
 export class GenericClient {
   constructor(private cfg: ClientConfig) {}
 
-  async chat(messages: ChatMessage[], tools?: any[], signal?: AbortSignal): Promise<ChatResponse> {
+  async chat(
+    messages: ChatMessage[],
+    tools?: any[],
+    signal?: AbortSignal,
+    onDelta?: OnDelta,
+  ): Promise<ChatResponse> {
     // Never execute tools. Attacker calls omit `tools`; defender may pass stub schemas.
     const useTools = tools ?? [];
     const clipped = clipToContextLimit(messages, contextLimitTokens());
@@ -143,9 +316,10 @@ export class GenericClient {
       ...(this.cfg.headers ?? {}),
     };
     const req = requestSignal(signal);
+    const responses = this.cfg.api === 'responses';
 
-    try {
-      if (this.cfg.api === 'responses') {
+    const bodyFor = (stream: boolean): Record<string, unknown> => {
+      if (responses) {
         const instructions = clipped
           .filter((m) => m.role === 'system')
           .map((m) => m.content)
@@ -158,55 +332,59 @@ export class GenericClient {
             role: m.role === 'assistant' ? 'assistant' : 'user',
             content: m.content,
           }));
-        const body: Record<string, unknown> = { model: this.cfg.model, input };
+        const body: Record<string, unknown> = { model: this.cfg.model, input, stream };
         if (instructions) body.instructions = instructions;
         if (useTools.length) {
           body.tools = responsesTools(useTools);
           body.tool_choice = 'auto';
         }
-        const res = await fetch(`${base}/responses`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: req.signal,
-        });
-        if (!res.ok) throw new Error(`Model error ${res.status}: ${await res.text()}`);
-        return parseResponses(await res.json());
+        return body;
       }
+      const body: Record<string, unknown> = {
+        model: this.cfg.model,
+        messages: clipped,
+        stream,
+        tools: useTools.length ? useTools : undefined,
+        tool_choice: useTools.length ? 'auto' : undefined,
+      };
+      if (this.cfg.reasoningEffort) body.reasoning_effort = this.cfg.reasoningEffort;
+      return body;
+    };
 
-      const res = await fetch(`${base}/chat/completions`, {
+    const post = async (stream: boolean) =>
+      fetch(`${base}/${responses ? 'responses' : 'chat/completions'}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          model: this.cfg.model,
-          messages: clipped,
-          tools: useTools.length ? useTools : undefined,
-          tool_choice: useTools.length ? 'auto' : undefined,
-        }),
+        body: JSON.stringify(bodyFor(stream)),
         signal: req.signal,
       });
 
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`Model error ${res.status}: ${err}`);
+    try {
+      let streamed = true;
+      let res = await post(true);
+      req.bump();
+      if (!res.ok && (res.status === 400 || res.status === 422)) {
+        await res.text().catch(() => '');
+        streamed = false;
+        res = await post(false);
+        req.bump();
+      }
+      if (!res.ok) throw new Error(`Model error ${res.status}: ${await res.text()}`);
+
+      if (streamed && isSse(res)) {
+        return responses
+          ? await finishResponsesStream(res, onDelta, req.bump)
+          : await finishChatStream(res, onDelta, req.bump);
       }
 
       const data = await res.json();
-      const choice = data.choices?.[0]?.message;
-
-      const toolCalls: ToolCall[] = (choice?.tool_calls ?? []).map((tc: any) => ({
-        id: tc.id,
-        type: 'function',
-        function: { name: tc.function.name, arguments: tc.function.arguments },
-      }));
-
-      return {
-        content: choice?.content ?? null,
-        toolCalls,
-        raw: data,
-      };
+      const parsed = responses ? parseResponses(data) : parseChatJson(data);
+      await onDelta?.(parsed);
+      return parsed;
     } catch (err) {
       throwFetch(err, req.signal, req.timeoutMs, this.cfg.model);
+    } finally {
+      req.clear();
     }
   }
 }
@@ -225,6 +403,8 @@ export async function listModels(
     res = await fetch(`${baseURL.replace(/\/$/, '')}/models`, { headers, signal: req.signal });
   } catch (err) {
     throwFetch(err, req.signal, req.timeoutMs);
+  } finally {
+    req.clear();
   }
   if (!res.ok) {
     const err = await res.text();

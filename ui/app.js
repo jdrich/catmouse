@@ -16,8 +16,10 @@ const levelsEl = document.getElementById('levels');
 const turnsEl = document.getElementById('turns');
 const atkProvider = document.getElementById('atk-provider');
 const atkModel = document.getElementById('atk-model');
+const atkThinking = document.getElementById('atk-thinking');
 const defProvider = document.getElementById('def-provider');
 const defModel = document.getElementById('def-model');
+const defThinking = document.getElementById('def-thinking');
 const fireBtn = document.getElementById('fire');
 const abortBtn = document.getElementById('abort');
 const liveEl = document.getElementById('live');
@@ -25,6 +27,7 @@ const liveTitle = document.getElementById('live-title');
 const liveLog = document.getElementById('live-log');
 const liveStrip = document.getElementById('live-strip');
 const mastSub = document.getElementById('mast-sub');
+const resumeBtn = document.getElementById('resume-run');
 
 function fmt(iso) {
   const d = new Date(iso);
@@ -40,9 +43,20 @@ function strip(run) {
   return `<span class="strip">${cells}</span>`;
 }
 
+function thinkingOf(side) {
+  return side?.reasoningEffort || side?.thinking || '';
+}
+
 function sideLabel(side, run) {
   const s = run[side] || {};
-  return `${s.model || '?'}${s.thinking ? ` / ${s.thinking}` : ''}`;
+  const think = thinkingOf(s);
+  return `${s.model || '?'}${think ? ` / ${think}` : ''}`;
+}
+
+function canResumeRun(run) {
+  if (!run || run.status !== 'error' && run.status !== 'aborted') return false;
+  if (run.cursor) return true;
+  return LEVELS.some((L) => !run.levels?.[L.id]);
 }
 
 function models(run) {
@@ -164,9 +178,10 @@ function openRun(run, opts = {}) {
 }
 
 function paintModal(run) {
-  const live = run.status === 'running' ? '  ·  live' : '';
+  const live = run.status === 'running' ? '  ·  live' : run.status === 'error' ? '  ·  error' : run.status === 'aborted' ? '  ·  aborted' : '';
   modalTitle.textContent = `${run.id}  ·  highest L${highestSuccess(run) || 0}${live}`;
   modalSub.textContent = `${fmt(run.at)}  ·  ${models(run)}`;
+  resumeBtn.hidden = !canResumeRun(run);
   renderLevels();
   renderTurns();
 }
@@ -266,15 +281,24 @@ function goalBanner(id) {
 }
 
 function attackerTurns(rec) {
-  return (rec?.turns || []).filter((t) => !t.probe).length;
+  return (rec?.turns || []).filter((t) => !t.probe && !t.restart).length;
+}
+
+function runErrorBanner() {
+  const msg = current?.error || (current?.status === 'error' ? current?.note : '') || '';
+  if (!msg) return '';
+  return `<div class="run-error">${escapeHtml(msg)}</div>`;
 }
 
 function renderTurns() {
   const rec = current.levels?.[currentLevel] || { turns: [] };
   const turns = rec.turns || [];
-  const head = goalBanner(currentLevel);
+  const head = runErrorBanner() + goalBanner(currentLevel);
   if (!turns.length) {
-    turnsEl.innerHTML = `${head}<div class="empty">No turns recorded for this level (0/${TURN_LIMIT}).</div>`;
+    const empty = current?.status === 'error'
+      ? 'Run died before this level recorded a turn.'
+      : `No turns recorded for this level (0/${TURN_LIMIT}).`;
+    turnsEl.innerHTML = `${head}<div class="empty">${empty}</div>`;
     return;
   }
   turnsEl.innerHTML = head + turns
@@ -282,10 +306,25 @@ function renderTurns() {
       const tools = (t.toolCalls || [])
         .map((tc) => `${tc.name}(${tc.arguments})`)
         .join('\n');
-      const attackText = stripBudget(t.attacker || t.payload || '');
+      const attackText = stripRestart(stripBudget(t.attacker || t.payload || ''));
       const payload = t.payload != null ? t.payload : '';
       const showPayload = payload && payload.trim() !== attackText.trim();
-      const rem = remainingOf(t);
+      if (t.pending) {
+        return `<div class="turn pending">
+        <div class="who">turn ${i + 1}</div>
+        <div class="who cat">attacker</div>
+        <pre class="bubble">${escapeHtml(attackText || payload)}</pre>
+        ${showPayload ? `<div class="who cat">payload → defender</div><pre class="bubble">${escapeHtml(payload)}</pre>` : ''}
+        <div class="who mouse">defender</div>
+        <pre class="bubble">${escapeHtml(t.defender || '')}</pre>
+      </div>`;
+      }
+      if (t.restart) {
+        return `<div class="turn restart">
+        <div class="who harness">harness</div>
+        <pre class="bubble harness">Defender session reset by attacker</pre>
+      </div>`;
+      }
       if (t.probe) {
         return `<div class="turn probe">
         <div class="who">turn ${i + 1} · probe</div>
@@ -298,7 +337,6 @@ function renderTurns() {
       }
       return `<div class="turn">
         <div class="who">turn ${i + 1}</div>
-        ${rem != null ? `<div class="who harness">harness → attacker</div><pre class="bubble harness">Turns remaining: ${rem} of ${TURN_LIMIT}.</pre>` : ''}
         <div class="who cat">attacker</div>
         <pre class="bubble">${escapeHtml(attackText || payload)}</pre>
         ${showPayload ? `<div class="who cat">payload → defender</div><pre class="bubble">${escapeHtml(payload)}</pre>` : ''}
@@ -316,10 +354,14 @@ function stripBudget(s) {
     .trim();
 }
 
-function remainingOf(t) {
-  if (t.remaining != null) return t.remaining;
-  const m = /Turns remaining: (\d+)/i.exec(t.attacker || '');
-  return m ? Number(m[1]) : null;
+function stripRestart(s) {
+  const raw = String(s || '');
+  const nl = raw.search(/\r?\n/);
+  const first = (nl === -1 ? raw : raw.slice(0, nl)).trim();
+  if (first.toLowerCase() === '/restart') {
+    return (nl === -1 ? '' : raw.slice(nl).replace(/^\r?\n/, '')).trim();
+  }
+  return raw;
 }
 
 function providerIds() {
@@ -372,6 +414,8 @@ async function fire() {
     attacker: { provider: atkProvider.value, model: atkModel.value },
     defender: { provider: defProvider.value, model: defModel.value },
   };
+  if (atkThinking.value) body.attacker.reasoningEffort = atkThinking.value;
+  if (defThinking.value) body.defender.reasoningEffort = defThinking.value;
   if (!body.attacker.model || !body.defender.model) {
     liveEl.hidden = false;
     liveTitle.textContent = 'pick both models';
@@ -392,10 +436,25 @@ async function fire() {
     setArmed(false);
     liveEl.hidden = false;
     liveTitle.textContent = 'misfire';
-    liveLine(data.error || res.statusText);
+    const err = data.error || res.statusText;
+    liveLine(err);
+    const stub = {
+      id: 'misfire',
+      at: new Date().toISOString(),
+      kind: 'attack',
+      status: 'error',
+      attacker: body.attacker,
+      defender: body.defender,
+      successes: 0,
+      note: err,
+      error: err,
+      levels: {},
+    };
+    openRun(stub, { follow: false });
     return;
   }
   liveTitle.textContent = data.id;
+  liveTitle.dataset.runId = data.id;
   liveLine(`cat ${body.attacker.provider}/${body.attacker.model}`);
   liveLine(`mouse ${body.defender.provider}/${body.defender.model}`);
   const stub = {
@@ -415,10 +474,72 @@ async function fire() {
   watchRun(data.id);
 }
 
+async function resumeCurrent() {
+  const run = current;
+  if (!canResumeRun(run)) return;
+  resumeBtn.disabled = true;
+  liveHits.clear();
+  paintLiveStrip();
+  liveLog.textContent = '';
+  setArmed(true);
+  liveTitle.textContent = 'resume…';
+  let data = {};
+  try {
+    const res = await fetch('/api/runs/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: run.id }),
+    });
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+  } catch (err) {
+    setArmed(false);
+    liveEl.hidden = false;
+    liveTitle.textContent = 'resume failed';
+    liveLine(err instanceof Error ? err.message : String(err));
+    resumeBtn.disabled = false;
+    return;
+  }
+  resumeBtn.disabled = false;
+  liveTitle.textContent = data.id;
+  liveTitle.dataset.runId = data.id;
+  liveLine(`resume ${data.id}`);
+  const stub = { ...run, status: 'running', error: undefined, note: 'resuming' };
+  upsertRun(stub);
+  renderLog();
+  openRun(stub, { follow: true });
+  watchRun(data.id);
+}
+
+function followRun(run) {
+  if (!run?.id) return;
+  liveTitle.dataset.runId = run.id;
+  upsertRun(run);
+  renderLog();
+  openRun(run, { follow: true });
+  watchRun(run.id);
+}
+
+function openLiveModal() {
+  const id = liveTitle.dataset.runId || watchingId;
+  if (!id) return;
+  const run = (current?.id === id && current) || RUNS.find((r) => r.id === id);
+  if (!run) {
+    void pullRun(id).then(() => {
+      const next = RUNS.find((r) => r.id === id);
+      if (next) openRun(next, { follow: next.status === 'running' });
+    });
+    return;
+  }
+  openRun(run, { follow: run.status === 'running' });
+  if (run.status === 'running') watchRun(run.id);
+}
+
 function onEvent(event) {
   if (event.type === 'hello' && event.current?.id) {
     setArmed(true);
     liveTitle.textContent = event.current.id;
+    followRun(event.current);
   }
   if (event.type === 'start') {
     setArmed(true);
@@ -426,6 +547,7 @@ function onEvent(event) {
     paintLiveStrip();
     liveTitle.textContent = event.run.id;
     liveLine(`start ${event.run.id}`);
+    followRun(event.run);
   }
   if (event.type === 'turn') {
     liveTitle.textContent = `L${event.level} ${event.name}  ·  turn ${event.turnsUsed}/${TURN_LIMIT}${event.success ? '  HIT' : ''}`;
@@ -449,11 +571,13 @@ function onEvent(event) {
 }
 
 async function refreshRuns() {
+  let currentRun = null;
   try {
     const res = await fetch('/api/runs');
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     RUNS = data.runs || [];
+    currentRun = data.current || null;
     mastSub.textContent = `${RUNS.length} runs · ${TURN_LIMIT}-turn budget · 8 levels`;
   } catch {
     RUNS = window.CATMOUSE_DUMMY?.runs?.slice() || [];
@@ -461,6 +585,7 @@ async function refreshRuns() {
   }
   initFilters();
   renderLog();
+  return currentRun;
 }
 
 async function loadCatalog() {
@@ -480,13 +605,61 @@ back.addEventListener('click', (e) => {
   if (e.target === back) back.classList.remove('open');
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') back.classList.remove('open');
+  if (e.key !== 'Escape') return;
+  if (confirmEl.classList.contains('open')) {
+    closeAbortConfirm();
+    return;
+  }
+  back.classList.remove('open');
 });
 atkProvider.addEventListener('change', () => fillRoleModels(atkProvider, atkModel, 'attacker'));
 defProvider.addEventListener('change', () => fillRoleModels(defProvider, defModel, 'defender'));
+
+atkModel.addEventListener('change', () => toggleThinking(atkModel, atkThinking));
+defModel.addEventListener('change', () => toggleThinking(defModel, defThinking));
+
+function toggleThinking(modelEl, thinkingEl) {
+  const isDeepSeek = String(modelEl.value || '').toLowerCase().startsWith('deepseek');
+  const label = thinkingEl.parentElement;
+  if (isDeepSeek) {
+    thinkingEl.value = '';
+    label.style.display = 'none';
+  } else {
+    label.style.display = '';
+  }
+}
+
+const confirmEl = document.getElementById('confirm');
+const confirmOk = document.getElementById('confirm-ok');
+const confirmCancel = document.getElementById('confirm-cancel');
+
+function openAbortConfirm() {
+  confirmEl.classList.add('open');
+}
+function closeAbortConfirm() {
+  confirmEl.classList.remove('open');
+}
+
 fireBtn.addEventListener('click', () => void fire());
-abortBtn.addEventListener('click', () => {
+resumeBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  void resumeCurrent();
+});
+liveEl.addEventListener('click', (e) => {
+  if (e.target.closest('#abort')) return;
+  openLiveModal();
+});
+abortBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openAbortConfirm();
+});
+confirmCancel.addEventListener('click', () => closeAbortConfirm());
+confirmOk.addEventListener('click', () => {
+  closeAbortConfirm();
   void fetch('/api/runs/abort', { method: 'POST' });
+});
+confirmEl.addEventListener('click', (e) => {
+  if (e.target === confirmEl) closeAbortConfirm();
 });
 
 const events = new EventSource('/api/events');
@@ -506,5 +679,8 @@ void (async function boot() {
     liveTitle.textContent = 'models failed';
     liveLine(err instanceof Error ? err.message : String(err));
   }
-  await refreshRuns();
+  const currentRun = await refreshRuns();
+  if (currentRun?.id && currentRun.status !== 'done' && currentRun.status !== 'error' && currentRun.status !== 'aborted') {
+    followRun(currentRun);
+  }
 })();

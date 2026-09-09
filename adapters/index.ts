@@ -25,6 +25,11 @@ export const adapters = {
       'x-opencode-session': randomUUID(),
     }),
   }),
+  llama: completionsAdapter('llama', {
+    baseURL: 'http://127.0.0.1:8080/v1',
+    presentEnv: 'LLAMA_BASE_URL',
+    api: 'chat',
+  }),
   [grokCli.id]: grokCli,
 } as const satisfies Record<string, Adapter>;
 

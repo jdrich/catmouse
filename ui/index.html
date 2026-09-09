@@ -25,6 +25,15 @@
           <label>model
             <select id="atk-model"></select>
           </label>
+          <label>thinking
+            <select id="atk-thinking">
+              <option value="">default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
         </div>
         <button id="fire" type="button">attack</button>
         <div class="side mouse">
@@ -35,10 +44,19 @@
           <label>model
             <select id="def-model"></select>
           </label>
+          <label>thinking
+            <select id="def-thinking">
+              <option value="">default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
         </div>
       </section>
 
-      <section id="live" class="live" hidden>
+      <section id="live" class="live" hidden title="open run log">
         <header>
           <span class="pulse" aria-hidden="true"></span>
           <span id="live-title">live</span>
@@ -67,6 +85,21 @@
       <div id="log" class="log"></div>
     </div>
 
+    <div id="confirm" class="modal-back confirm-back" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal confirm">
+        <div class="modal-h">
+          <div>
+            <h2 id="confirm-title">Abort this run?</h2>
+            <p>Stops the live attack. Turns already written stay on disk.</p>
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button type="button" id="confirm-cancel">cancel</button>
+          <button type="button" id="confirm-ok">abort</button>
+        </div>
+      </div>
+    </div>
+
     <div id="modal" class="modal-back" role="dialog" aria-modal="true">
       <div class="modal">
         <div class="modal-h">
@@ -74,7 +107,10 @@
             <h2 id="modal-title">run</h2>
             <p id="modal-sub"></p>
           </div>
-          <button class="x" id="close" type="button" aria-label="Close">×</button>
+          <div class="modal-actions">
+            <button id="resume-run" type="button" hidden>resume</button>
+            <button class="x" id="close" type="button" aria-label="Close">×</button>
+          </div>
         </div>
         <div class="body">
           <nav id="levels" class="levels"></nav>

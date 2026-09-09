@@ -4,7 +4,8 @@ node_modules
 .grok-oauth-pending.json
 .grok-login.log
 .models-cache.json
-runs/*.json
+runs/
 ui/serve.log
 ui/serve.err
+ui/serve.pid
 AGENTS.md

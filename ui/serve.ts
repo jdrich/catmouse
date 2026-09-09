@@ -3,14 +3,14 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readdir, readFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adapters, type AdapterId } from '../adapters/index.ts';
-import { listModels } from '../harness/genericClient.ts';
+import { listModels, type ReasoningEffort } from '../harness/genericClient.ts';
 import { loadEnv, turnLimit } from '../harness/loadEnv.ts';
 import { readModelCache, writeModelCache, type ModelCache } from '../harness/modelCache.ts';
-import { driveRun, LEVELS, type RunEvent, type RunRecord } from '../harness/run.ts';
+import { canResume, driveRun, LEVELS, loadRun, publicRun, type RunEvent, type RunRecord } from '../harness/run.ts';
 
 const uiRoot = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(uiRoot, '..');
@@ -26,6 +26,11 @@ const mime: Record<string, string> = {
 
 loadEnv(join(repoRoot, '.env'));
 
+// Refresh model list on start if enabled (default true)
+if (process.env.REFRESH_MODELS_ON_START !== 'false') {
+  try { unlinkSync(join(repoRoot, '.models-cache.json')); } catch {}
+}
+
 type SseClient = ServerResponse;
 const sse = new Set<SseClient>();
 let current: { id: string; abort: AbortController; run?: RunRecord } | null = null;
@@ -39,7 +44,11 @@ function json(res: ServerResponse, status: number, body: unknown) {
 }
 
 function emit(event: RunEvent) {
-  const line = `data: ${JSON.stringify(event)}\n\n`;
+  const payload =
+    event.type === 'start' || event.type === 'done'
+      ? { ...event, run: publicRun(event.run) }
+      : event;
+  const line = `data: ${JSON.stringify(payload)}\n\n`;
   for (const client of sse) client.write(line);
 }
 
@@ -66,7 +75,7 @@ async function listRunFiles(): Promise<RunRecord[]> {
   for (const name of names) {
     try {
       const raw = JSON.parse(await readFile(join(dir, name), 'utf8')) as RunRecord;
-      if (raw?.kind === 'attack' && raw.id) runs.push(raw);
+      if (raw?.kind === 'attack' && raw.id) runs.push(publicRun(raw));
     } catch {
       /* skip junk */
     }
@@ -155,10 +164,12 @@ async function startRun(body: { attacker?: { provider?: string; model?: string }
   const attacker = {
     provider: body.attacker?.provider || process.env.ATTACKER_PROVIDER || '',
     model: body.attacker?.model || process.env.ATTACKER_MODEL || '',
+    reasoningEffort: body.attacker?.reasoningEffort as ReasoningEffort | undefined,
   };
   const defender = {
     provider: body.defender?.provider || process.env.DEFENDER_PROVIDER || '',
     model: body.defender?.model || process.env.DEFENDER_MODEL || '',
+    reasoningEffort: body.defender?.reasoningEffort as ReasoningEffort | undefined,
   };
   if (!isAdapterId(attacker.provider) || !isAdapterId(defender.provider)) {
     throw new Error('attacker and defender need a known provider');
@@ -205,6 +216,40 @@ async function startRun(body: { attacker?: { provider?: string; model?: string }
   return { id, attacker, defender };
 }
 
+async function resumeRun(id: string) {
+  if (current) {
+    const err = new Error('a run is already in progress');
+    (err as Error & { status: number }).status = 409;
+    throw err;
+  }
+  const prior = await loadRun(id);
+  if (!prior) {
+    const err = new Error('not found');
+    (err as Error & { status: number }).status = 404;
+    throw err;
+  }
+  if (!canResume(prior)) throw new Error('this run cannot be resumed');
+  const abort = new AbortController();
+  current = {
+    id: prior.id,
+    abort,
+    run: { ...prior, status: 'running', error: undefined, note: 'resuming' },
+  };
+  void driveRun({
+    resume: prior,
+    signal: abort.signal,
+    onEvent: (event) => {
+      if ((event.type === 'start' || event.type === 'done') && current) current.run = event.run;
+      emit(event);
+    },
+  })
+    .catch(() => undefined)
+    .finally(() => {
+      if (current?.id === prior.id) current = null;
+    });
+  return { id: prior.id, attacker: prior.attacker, defender: prior.defender, resume: true };
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   const { pathname } = url;
   if (req.method === 'GET' && pathname === '/api/models') {
@@ -217,7 +262,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return true;
   }
   if (req.method === 'GET' && pathname === '/api/runs') {
-    json(res, 200, { current: current?.run ?? (current ? { id: current.id, status: 'running' } : null), runs: await listRunFiles() });
+    const live = current?.run ? publicRun(current.run) : current ? { id: current.id, status: 'running' } : null;
+    json(res, 200, { current: live, runs: await listRunFiles() });
     return true;
   }
   if (req.method === 'GET' && pathname.startsWith('/api/runs/')) {
@@ -227,7 +273,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return true;
     }
     if (current?.id === id && current.run) {
-      json(res, 200, current.run);
+      json(res, 200, publicRun(current.run));
       return true;
     }
     const file = join(repoRoot, 'runs', `${id}.json`);
@@ -235,13 +281,27 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       json(res, 404, { error: 'not found' });
       return true;
     }
-    json(res, 200, JSON.parse(readFileSync(file, 'utf8')));
+    json(res, 200, publicRun(JSON.parse(readFileSync(file, 'utf8')) as RunRecord));
     return true;
   }
   if (req.method === 'POST' && pathname === '/api/runs') {
     try {
       const body = JSON.parse((await readBody(req)) || '{}') as Parameters<typeof startRun>[0];
       json(res, 202, await startRun(body));
+    } catch (err) {
+      const status = (err as { status?: number }).status || 400;
+      json(res, status, { error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+  if (req.method === 'POST' && pathname === '/api/runs/resume') {
+    try {
+      const body = JSON.parse((await readBody(req)) || '{}') as { id?: string };
+      if (!body.id || !/^run-[A-Za-z0-9._-]+$/.test(body.id)) {
+        json(res, 400, { error: 'bad id' });
+        return true;
+      }
+      json(res, 202, await resumeRun(body.id));
     } catch (err) {
       const status = (err as { status?: number }).status || 400;
       json(res, status, { error: err instanceof Error ? err.message : String(err) });
@@ -263,7 +323,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify({ type: 'hello', current: current?.run ?? (current ? { id: current.id, status: 'running' } : null) })}\n\n`);
+    const hello = current?.run ? publicRun(current.run) : current ? { id: current.id, status: 'running' } : null;
+    res.write(`data: ${JSON.stringify({ type: 'hello', current: hello })}\n\n`);
     sse.add(res);
     req.on('close', () => sse.delete(res));
     return true;
