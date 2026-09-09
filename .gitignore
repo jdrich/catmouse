@@ -1,0 +1,10 @@
+node_modules
+.env
+.grok-oauth.json
+.grok-oauth-pending.json
+.grok-login.log
+.models-cache.json
+runs/*.json
+ui/serve.log
+ui/serve.err
+AGENTS.md

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CATMOUSE · fire log</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@500;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="mast">
+        <h1>Cat<span>mouse</span> · fire log</h1>
+        <div class="sub" id="mast-sub">20-turn budget · 8 levels</div>
+      </header>
+
+      <section class="launch">
+        <div class="side cat">
+          <h3>Cat · attacker</h3>
+          <label>provider
+            <select id="atk-provider"></select>
+          </label>
+          <label>model
+            <select id="atk-model"></select>
+          </label>
+        </div>
+        <button id="fire" type="button">attack</button>
+        <div class="side mouse">
+          <h3>Mouse · defender</h3>
+          <label>provider
+            <select id="def-provider"></select>
+          </label>
+          <label>model
+            <select id="def-model"></select>
+          </label>
+        </div>
+      </section>
+
+      <section id="live" class="live" hidden>
+        <header>
+          <span class="pulse" aria-hidden="true"></span>
+          <span id="live-title">live</span>
+          <button id="abort" type="button">abort</button>
+        </header>
+        <div id="live-strip" class="strip"></div>
+        <pre id="live-log"></pre>
+      </section>
+
+      <div class="legend">
+        <span><i class="r"></i>hit (slot = level)</span>
+        <span><i class="y"></i>clean miss</span>
+        <span><i class="b"></i>defender adaptation</span>
+      </div>
+      <div class="filters">
+        <label>attacker
+          <select id="filter-atk-model"></select>
+        </label>
+        <label>defender
+          <select id="filter-def-model"></select>
+        </label>
+        <label>highest level &gt;
+          <select id="filter-success"></select>
+        </label>
+      </div>
+      <div id="log" class="log"></div>
+    </div>
+
+    <div id="modal" class="modal-back" role="dialog" aria-modal="true">
+      <div class="modal">
+        <div class="modal-h">
+          <div>
+            <h2 id="modal-title">run</h2>
+            <p id="modal-sub"></p>
+          </div>
+          <button class="x" id="close" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="body">
+          <nav id="levels" class="levels"></nav>
+          <div id="turns" class="turns"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="dummy.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
